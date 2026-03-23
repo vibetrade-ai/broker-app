@@ -1,0 +1,23 @@
+# Dependencies
+backend/node_modules/
+frontend/node_modules/
+
+# Build output
+backend/dist/
+frontend/.next/
+frontend/out/
+frontend/next-env.d.ts
+frontend/tsconfig.tsbuildinfo
+
+# Runtime data
+backend/data/
+backend/coverage/
+
+# Secrets
+.env
+.env.*
+backend/.env
+frontend/.env*
+
+# macOS
+.DS_Store

@@ -1,0 +1,402 @@
+import type { FastifyInstance } from "fastify";
+import Anthropic from "@anthropic-ai/sdk";
+import { randomUUID } from "crypto";
+import type { BrokerAdapter } from "../lib/brokers/types.js";
+import { getBrokerAdapter, getAnthropicClient } from "../lib/credentials.js";
+import { BrokerAuthError } from "../lib/brokers/errors.js";
+import { TOOLS, type ToolDefinition, getAllToolDefinitions, getApprovalDescription, createUpdateMemoryTool, createRegisterTriggerTool, createCancelTriggerTool, createListTriggersTool, createPauseTriggerTool, createResumeTriggerTool, createGetTriggerRunsTool, createStrategyTools, createTradeTools, createPortfolioTools } from "../lib/tools.js";
+import type { ClientMessage, ServerMessage } from "../types.js";
+import type { ConversationStore, MemoryStore, TriggerStore, TriggerAuditStore, ApprovalStore, StrategyStore, TradeStore, PortfolioStore } from "../lib/storage/index.js";
+import { getSecurityId } from "../lib/brokers/dhan/instruments.js";
+import { computeDeployedCapital } from "../lib/trade-utils.js";
+
+function buildSystemPrompt(broker: BrokerAdapter | null): string {
+  const base = `You are VibeTrade, an AI-powered trading assistant connected to the user's brokerage account.
+
+You have access to tools to fetch live quotes, view positions/funds/orders, and place or cancel orders.
+
+IMPORTANT — tool usage rules:
+- Always call the relevant tool FIRST before writing any response. Never start writing an answer and then call a tool mid-sentence.
+- After receiving tool results, write your full response based on the data.
+- Do not narrate what you are about to do ("Let me check..." / "I'll look that up..."). Just call the tool silently and then present the result.
+- Only call tools that the user explicitly asked for. Do not make unsolicited tool calls.
+
+Formatting:
+- Format monetary values in Indian Rupees (₹) with Indian number formatting (e.g. ₹1,23,456.78)
+- Use markdown tables for structured data (positions, orders)
+- Be concise — lead with the numbers, add brief commentary after
+- For market orders, note that execution price may differ from the quoted LTP
+
+Error handling:
+- If a tool returns an error starting with "TOOL_ERROR:", explain what went wrong in plain, friendly language — no technical jargon, no HTTP status codes, no internal error codes
+- Common translations: a 400 error on a quote usually means the market is closed or the symbol isn't available right now; a 400 on an order means the order parameters were invalid; a 5xx means the broker's servers are having issues
+- If the error is "TOOL_ERROR: TOKEN_EXPIRED", tell the user their session has expired and they need to reconnect — do not call any more tools`;
+
+  if (!broker) return base;
+
+  const caps = broker.capabilities;
+  const brokerBlock = `\n\n<broker>
+Name: ${caps.name}
+Markets: ${caps.markets.join(", ")}
+Asset classes: ${caps.assetClasses.join(", ")}
+Historical data: ${caps.supportsHistoricalData}
+Market depth: ${caps.supportsMarketDepth}
+Available indices: ${caps.availableIndices.join(", ")}
+</broker>`;
+
+  return base + brokerBlock;
+}
+
+export async function chatRoute(fastify: FastifyInstance, opts: { store: ConversationStore; memory: MemoryStore; triggers: TriggerStore; triggerAudit: TriggerAuditStore; approvals: ApprovalStore; strategies: StrategyStore; trades: TradeStore; portfolios?: PortfolioStore }) {
+  fastify.get("/ws/chat", { websocket: true }, async (socket, request) => {
+    const pendingApprovals = new Map<string, (approved: boolean) => void>();
+    const conversationId =
+      (request.query as { conversationId?: string }).conversationId ?? randomUUID();
+    const conversationHistory: Anthropic.MessageParam[] = await opts.store.load(conversationId);
+
+    const updateMemoryTool = createUpdateMemoryTool(opts.memory);
+    const registerTriggerTool = createRegisterTriggerTool(opts.triggers);
+    const cancelTriggerTool = createCancelTriggerTool(opts.triggers);
+    const listTriggersTool = createListTriggersTool(opts.triggers);
+    const pauseTriggerTool = createPauseTriggerTool(opts.triggers);
+    const resumeTriggerTool = createResumeTriggerTool(opts.triggers);
+    const getTriggerRunsTool = createGetTriggerRunsTool(opts.triggerAudit);
+    const strategyToolList = createStrategyTools(opts.strategies, opts.triggers, opts.trades);
+    const tradeToolList = createTradeTools(opts.trades);
+    const portfolioToolList = opts.portfolios
+      ? createPortfolioTools(opts.portfolios, opts.triggers, opts.trades)
+      : [];
+    const localTools: Record<string, ToolDefinition> = {
+      update_memory: updateMemoryTool,
+      register_trigger: registerTriggerTool,
+      cancel_trigger: cancelTriggerTool,
+      list_triggers: listTriggersTool,
+      pause_trigger: pauseTriggerTool,
+      resume_trigger: resumeTriggerTool,
+      get_trigger_runs: getTriggerRunsTool,
+    };
+    for (const t of strategyToolList) {
+      localTools[t.definition.name] = t;
+    }
+    for (const t of tradeToolList) {
+      localTools[t.definition.name] = t;
+    }
+    for (const t of portfolioToolList) {
+      localTools[t.definition.name] = t;
+    }
+    const memoryContent = await opts.memory.read();
+
+    function send(msg: ServerMessage) {
+      if (socket.readyState === socket.OPEN) {
+        socket.send(JSON.stringify(msg));
+      }
+    }
+
+    socket.on("message", async (raw: Buffer | string) => {
+      let clientMsg: ClientMessage;
+      try {
+        clientMsg = JSON.parse(raw.toString()) as ClientMessage;
+      } catch {
+        send({ type: "error", message: "Invalid JSON message" });
+        return;
+      }
+
+      if (clientMsg.type === "tool_approval_response") {
+        const resolver = pendingApprovals.get(clientMsg.requestId);
+        if (resolver) {
+          pendingApprovals.delete(clientMsg.requestId);
+          resolver(clientMsg.approved);
+        }
+        return;
+      }
+
+      if (clientMsg.type === "message") {
+        const saveFrom = conversationHistory.length;
+        for (const msg of clientMsg.messages) {
+          if (msg.role !== "user" && msg.role !== "assistant") continue;
+          conversationHistory.push({ role: msg.role, content: msg.content });
+        }
+
+        // Resolve @mention strategy context for this turn
+        const lastUserMsg = clientMsg.messages.find(m => m.role === "user");
+
+        let broker: BrokerAdapter | null = null;
+        try { broker = getBrokerAdapter(); } catch { /* not configured */ }
+
+        const baseSystemPrompt = buildSystemPrompt(broker) + (memoryContent ? `\n\n<memory>\n${memoryContent}\n</memory>` : "");
+        let turnSystemPrompt = baseSystemPrompt;
+
+        if (lastUserMsg) {
+          const mentionPattern = /@([\w\s-]+)/g;
+          const matches = [...String(lastUserMsg.content).matchAll(mentionPattern)];
+          if (matches.length > 0) {
+            const allStrategies = await opts.strategies.list();
+            const strategyBlocks: string[] = [];
+            for (const match of matches) {
+              const mentionName = match[1].trim().toLowerCase();
+              const resolved = allStrategies.find(s => s.name.toLowerCase().includes(mentionName));
+              if (resolved) {
+                strategyBlocks.push(`<strategy name="${resolved.name}">
+${resolved.plan}
+</strategy>`);
+              }
+            }
+            if (strategyBlocks.length > 0) {
+              turnSystemPrompt = baseSystemPrompt + "\n\n" + strategyBlocks.join("\n\n");
+            }
+          }
+        }
+
+        await runClaudeLoop(broker, conversationHistory, pendingApprovals, send, turnSystemPrompt, localTools, opts.approvals, opts.trades, opts.portfolios);
+        await opts.store.append(conversationId, conversationHistory.slice(saveFrom));
+      }
+    });
+
+    socket.on("close", () => {
+      for (const resolver of pendingApprovals.values()) resolver(false);
+      pendingApprovals.clear();
+    });
+
+    socket.on("error", (err: Error) => {
+      console.error("WebSocket error:", err);
+    });
+  });
+}
+
+// Executes a tool and returns a result string. Never throws.
+// Returns isError=true so the caller can surface it to the frontend.
+export async function runTool(
+  toolDef: ToolDefinition,
+  args: Record<string, unknown>,
+  broker: BrokerAdapter | null
+): Promise<{ result: string; isError: boolean; tokenExpired: boolean }> {
+  try {
+    const result = await toolDef.handler(args, broker as BrokerAdapter);
+    return { result, isError: false, tokenExpired: false };
+  } catch (err) {
+    if (err instanceof BrokerAuthError) {
+      return {
+        result: "TOOL_ERROR: TOKEN_EXPIRED — Your broker session has expired. Please update your access token and restart the backend.",
+        isError: true,
+        tokenExpired: true,
+      };
+    }
+    const msg = err instanceof Error ? err.message : String(err);
+    return { result: `TOOL_ERROR: ${msg}`, isError: true, tokenExpired: false };
+  }
+}
+
+export async function runClaudeLoop(
+  broker: BrokerAdapter | null,
+  history: Anthropic.MessageParam[],
+  pendingApprovals: Map<string, (approved: boolean) => void>,
+  send: (msg: ServerMessage) => void,
+  systemPrompt: string,
+  localTools: Record<string, ToolDefinition> = {},
+  approvals?: ApprovalStore,
+  trades?: TradeStore,
+  portfolios?: PortfolioStore
+) {
+  let tokenExpired = false;
+
+  try {
+    const anthropic = getAnthropicClient();
+
+    while (true) {
+      const stream = anthropic.messages.stream({
+        model: "claude-sonnet-4-6",
+        max_tokens: 8096,
+        system: systemPrompt,
+        tools: getAllToolDefinitions(Object.values(localTools), broker ?? undefined),
+        messages: history,
+      });
+
+      stream.on("text", (text) => {
+        send({ type: "text_delta", content: text });
+      });
+
+      const finalMessage = await stream.finalMessage();
+
+      const toolUses: Anthropic.ToolUseBlock[] = [];
+      for (const block of finalMessage.content) {
+        if (block.type === "tool_use") toolUses.push(block);
+      }
+
+      history.push({ role: "assistant", content: finalMessage.content });
+
+      if (finalMessage.stop_reason === "end_turn" || toolUses.length === 0) {
+        send({ type: "done" });
+        if (tokenExpired) send({ type: "token_expired" });
+        return;
+      }
+
+      const toolResults: Anthropic.ToolResultBlockParam[] = [];
+
+      // Kick off all read-only tools in parallel immediately.
+      // Approval-gated tools stay sequential — each needs an explicit user decision.
+      type ToolOut = { result: string; isError: boolean; tokenExpired: boolean };
+      const readOnlyPending = new Map<string, Promise<ToolOut>>();
+
+      for (const toolUse of toolUses) {
+        const toolDef = TOOLS[toolUse.name] ?? localTools[toolUse.name];
+        const args = toolUse.input as Record<string, unknown>;
+        // Skip register_trigger with hard_order — handled specially below, not pre-launched
+        const isHardOrderTrigger = toolUse.name === "register_trigger" && (args.action as Record<string, unknown>)?.type === "hard_order";
+        if (toolDef && !toolDef.requiresApproval && !isHardOrderTrigger) {
+          send({ type: "tool_use_start", tool: toolUse.name, args });
+          readOnlyPending.set(toolUse.id, runTool(toolDef, args, broker));
+        }
+      }
+
+      for (const toolUse of toolUses) {
+        const toolDef = TOOLS[toolUse.name] ?? localTools[toolUse.name];
+        if (!toolDef) {
+          send({ type: "tool_use_result", tool: toolUse.name, result: "Unknown tool", isError: true });
+          toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: `TOOL_ERROR: Unknown tool "${toolUse.name}"` });
+          continue;
+        }
+
+        const args = toolUse.input as Record<string, unknown>;
+        let result: string;
+        let isError = false;
+
+        // Special case: register_trigger with hard_order needs user approval
+        if (toolUse.name === "register_trigger" && (args.action as Record<string, unknown>)?.type === "hard_order") {
+          send({ type: "tool_use_start", tool: toolUse.name, args });
+          const requestId = randomUUID();
+          const tradeArgs = (args.action as Record<string, unknown>).tradeArgs as Record<string, unknown>;
+          send({
+            type: "tool_approval_request",
+            requestId,
+            tool: toolUse.name,
+            args,
+            description: `Register hard trigger: "${args.name as string}" — when condition fires, will ${tradeArgs.transaction_type} ${tradeArgs.quantity} × ${tradeArgs.symbol} (${tradeArgs.order_type}${tradeArgs.price ? ` @ ₹${tradeArgs.price}` : ""})`,
+          });
+
+          const approved = await new Promise<boolean>((resolve) => {
+            pendingApprovals.set(requestId, resolve);
+          });
+
+          if (!approved) {
+            result = "User denied this hard trigger.";
+          } else {
+            const out = await runTool(toolDef, args, broker);
+            result = out.result;
+            isError = out.isError;
+            if (out.tokenExpired) tokenExpired = true;
+          }
+          send({ type: "tool_use_result", tool: toolUse.name, result, isError });
+          toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: result });
+          continue;
+        }
+
+        if (toolDef.requiresApproval) {
+          // Capital enforcement for place_order attributed to a portfolio
+          if (toolUse.name === "place_order" && args.portfolio_id && portfolios && trades) {
+            const portfolioId = args.portfolio_id as string;
+            const portfolio = await portfolios.get(portfolioId).catch(() => null);
+            if (portfolio) {
+              const filledTrades = await trades.list({ portfolioId, status: "filled" });
+              const deployed = computeDeployedCapital(filledTrades);
+              const qty = args.quantity as number;
+              let price = args.price as number | undefined;
+              if (!price && broker) {
+                try {
+                  const quotes = await broker.getQuote([args.symbol as string]);
+                  price = Object.values(quotes)[0]?.lastPrice;
+                } catch { /* ignore */ }
+              }
+              const tradeCost = qty * (price ?? 0);
+              if (price && deployed + tradeCost > portfolio.allocation) {
+                const shortfall = +(deployed + tradeCost - portfolio.allocation).toFixed(2);
+                result = `Trade rejected: would exceed portfolio "${portfolio.name}" allocation of ₹${portfolio.allocation.toLocaleString("en-IN")}. Deployed: ₹${deployed.toFixed(2)}, Trade cost: ₹${tradeCost.toFixed(2)}, Shortfall: ₹${shortfall.toLocaleString("en-IN")}.`;
+                send({ type: "tool_use_result", tool: toolUse.name, result, isError: true });
+                toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: result });
+                continue;
+              }
+            }
+          }
+
+          send({ type: "tool_use_start", tool: toolUse.name, args });
+          const requestId = randomUUID();
+          send({
+            type: "tool_approval_request",
+            requestId,
+            tool: toolUse.name,
+            args,
+            description: getApprovalDescription(toolUse.name, args),
+          });
+
+          const approved = await new Promise<boolean>((resolve) => {
+            pendingApprovals.set(requestId, resolve);
+          });
+
+          if (!approved) {
+            result = "User denied this action.";
+          } else {
+            const out = await runTool(toolDef, args, broker);
+            result = out.result;
+            isError = out.isError;
+            if (out.tokenExpired) tokenExpired = true;
+
+            // Auto-record every successful place_order
+            if (toolUse.name === "place_order" && !isError && trades) {
+              try {
+                const parsed = JSON.parse(result) as Record<string, unknown>;
+                const orderId = String(parsed["orderId"] ?? randomUUID());
+                const symbol = (args.symbol as string).toUpperCase();
+                const securityId = await getSecurityId(symbol).catch(() => "unknown");
+                const currentStatus = String(parsed["currentStatus"] ?? "").toUpperCase();
+                const initialStatus: import("../lib/storage/types.js").TradeStatus =
+                  currentStatus === "FILLED" || currentStatus === "TRADED" || currentStatus === "PART_TRADED" ? "filled"
+                  : currentStatus === "REJECTED" ? "rejected"
+                  : currentStatus === "CANCELLED" || currentStatus === "EXPIRED" ? "cancelled"
+                  : "pending";
+                await trades.append({
+                  id: randomUUID(),
+                  orderId,
+                  symbol,
+                  securityId,
+                  transactionType: args.transaction_type as "BUY" | "SELL",
+                  quantity: args.quantity as number,
+                  orderType: args.order_type as "MARKET" | "LIMIT",
+                  requestedPrice: args.price as number | undefined,
+                  status: initialStatus,
+                  executedPrice: initialStatus === "filled"
+                    ? (parsed["executedPrice"] as number | undefined) : undefined,
+                  filledAt: initialStatus === "filled"
+                    ? (parsed["filledAt"] as string | undefined) : undefined,
+                  rejectionReason: initialStatus === "rejected"
+                    ? (parsed["rejectionReason"] as string | undefined) : undefined,
+                  strategyId: args.strategy_id as string | undefined,
+                  portfolioId: args.portfolio_id as string | undefined,
+                  note: args.note as string | undefined,
+                  createdAt: new Date().toISOString(),
+                });
+              } catch (err) {
+                console.error("[trades] failed to record trade:", err);
+              }
+            }
+          }
+        } else {
+          // Already running — just await the in-flight promise
+          const out = await readOnlyPending.get(toolUse.id)!;
+          result = out.result;
+          isError = out.isError;
+          if (out.tokenExpired) tokenExpired = true;
+        }
+
+        send({ type: "tool_use_result", tool: toolUse.name, result, isError });
+        toolResults.push({ type: "tool_result", tool_use_id: toolUse.id, content: result });
+      }
+
+      history.push({ role: "user", content: toolResults });
+    }
+  } catch (err) {
+    console.error("Claude loop error:", err);
+    send({
+      type: "error",
+      message: err instanceof Error ? err.message : "An unexpected error occurred",
+    });
+  }
+}
