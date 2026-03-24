@@ -47,6 +47,7 @@ export function ChatWindow({ initialConversationId }: { initialConversationId?: 
   const [inputText, setInputText] = useState("");
   const [isStreaming, setIsStreaming] = useState(false);
   const [isAwaitingResponse, setIsAwaitingResponse] = useState(false);
+  const [apiKeyMissing, setApiKeyMissing] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const streamingMsgIdRef = useRef<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -54,6 +55,13 @@ export function ChatWindow({ initialConversationId }: { initialConversationId?: 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
+
+  // Check if Anthropic API key is configured
+  useEffect(() => {
+    api.settings.getStatus()
+      .then(r => setApiKeyMissing(r.status["ANTHROPIC_API_KEY"] !== true))
+      .catch(() => {});
+  }, []);
 
   // Reset to a new chat when sidebar clears the stored conversation ID
   useEffect(() => {
@@ -216,7 +224,7 @@ export function ChatWindow({ initialConversationId }: { initialConversationId?: 
   };
 
   const sessionTitle = (messages.find(m => m.role === "user") as { text: string } | undefined)?.text?.slice(0, 50) ?? "New Chat";
-  const isInFlight = isStreaming || isAwaitingResponse;
+  const isInFlight = isStreaming || isAwaitingResponse || apiKeyMissing;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
@@ -507,6 +515,33 @@ export function ChatWindow({ initialConversationId }: { initialConversationId?: 
         <div ref={messagesEndRef} />
       </div>
 
+      {/* API key missing banner */}
+      {apiKeyMissing && (
+        <div style={{
+          borderTop: "1px solid #fde68a",
+          background: "#fffbeb",
+          padding: "10px 32px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: "12px",
+          flexShrink: 0,
+        }}>
+          <span style={{ fontSize: "13px", color: "#92400e" }}>
+            Anthropic API key is not set — chat is disabled.
+          </span>
+          <a href="/settings" style={{
+            fontSize: "13px",
+            fontWeight: "600",
+            color: "#92400e",
+            textDecoration: "underline",
+            whiteSpace: "nowrap",
+          }}>
+            Go to Settings →
+          </a>
+        </div>
+      )}
+
       {/* Input bar */}
       <div style={{
         borderTop: "1px solid var(--gray-200)",
@@ -527,7 +562,7 @@ export function ChatWindow({ initialConversationId }: { initialConversationId?: 
               handleSubmit();
             }
           }}
-          placeholder="Ask about your portfolio or describe a trade..."
+          placeholder={apiKeyMissing ? "Set your Anthropic API key in Settings to chat" : "Ask about your portfolio or describe a trade..."}
           disabled={isInFlight}
           style={{
             flex: 1,
