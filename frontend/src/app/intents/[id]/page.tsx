@@ -10,6 +10,7 @@ const STATUS_COLORS: Record<string, string> = {
   clarifying: "#F59E0B",
   planning: "#6366F1",
   active: "#00C9A7",
+  paused: "#F59E0B",
   completed: "#6B7280",
   failed: "#EF4444",
   cancelled: "#9CA3AF",
@@ -25,6 +26,7 @@ export default function IntentDetailPage({ params }: { params: Promise<{ id: str
   const [perfLoading, setPerfLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [planExpanded, setPlanExpanded] = useState(false);
+  const [pausing, setPausing] = useState(false);
 
   const refreshPerformance = useCallback(async () => {
     setPerfLoading(true);
@@ -77,6 +79,24 @@ export default function IntentDetailPage({ params }: { params: Promise<{ id: str
     }
   };
 
+  const handlePauseToggle = async () => {
+    if (!intent || pausing) return;
+    setPausing(true);
+    try {
+      if (intent.status === "active") {
+        await api.intents.pause(intent.id);
+        setIntent(prev => prev ? { ...prev, status: "paused" } : prev);
+      } else {
+        await api.intents.resume(intent.id);
+        setIntent(prev => prev ? { ...prev, status: "active" } : prev);
+      }
+    } catch (err) {
+      setError((err as Error).message);
+    } finally {
+      setPausing(false);
+    }
+  };
+
   if (loading) return <div style={{ maxWidth: "900px", margin: "0 auto", padding: "32px 24px", textAlign: "center", color: "#9CA3AF" }}>Loading...</div>;
   if (error) return <div style={{ maxWidth: "900px", margin: "0 auto", padding: "32px 24px", color: "#EF4444" }}>Error: {error}</div>;
   if (!intent) return <div style={{ maxWidth: "900px", margin: "0 auto", padding: "32px 24px", color: "#9CA3AF" }}>Intent not found</div>;
@@ -93,9 +113,14 @@ export default function IntentDetailPage({ params }: { params: Promise<{ id: str
       <div style={{ background: "white", borderRadius: "16px", padding: "24px", boxShadow: "0 1px 4px rgba(0,0,0,0.08)", marginBottom: "24px" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: "16px" }}>
           <div style={{ flex: 1, paddingRight: "16px" }}>
-            <h1 style={{ fontSize: "20px", fontWeight: "700", color: "#1A1A2E", margin: "0 0 8px 0", lineHeight: "1.4" }}>
-              {intent.text}
+            <h1 style={{ fontSize: "20px", fontWeight: "700", color: "#1A1A2E", margin: "0 0 4px 0", lineHeight: "1.4" }}>
+              {intent.title ?? intent.summary ?? intent.text}
             </h1>
+            {(intent.title ?? intent.summary) && (
+              <p style={{ margin: "0 0 8px", fontSize: "13px", color: "#6B7280", lineHeight: "1.4" }}>
+                {intent.summary ?? intent.text}
+              </p>
+            )}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <span style={{
@@ -282,15 +307,88 @@ export default function IntentDetailPage({ params }: { params: Promise<{ id: str
             </>
           )}
 
-          {performance.tradeCount === 0 && (
-            <p style={{ fontSize: "14px", color: "#9CA3AF", fontStyle: "italic", margin: 0 }}>No trades recorded yet</p>
+          {performance.trades.length > 0 ? (
+            <>
+              <h3 style={{ fontSize: "14px", fontWeight: "600", color: "#374151", margin: "20px 0 12px 0" }}>Trade History</h3>
+              <div style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+                {[...performance.trades]
+                  .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+                  .map((trade) => (
+                    <div key={trade.id} style={{
+                      display: "flex", justifyContent: "space-between", alignItems: "center",
+                      padding: "10px 14px", background: "#F8FAFB", borderRadius: "8px",
+                      border: "1px solid #E5E7EB",
+                    }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                        <span style={{
+                          width: "8px", height: "8px", borderRadius: "50%", flexShrink: 0,
+                          background: trade.transactionType === "BUY" ? "#00C9A7" : "#EF4444",
+                        }} />
+                        <span style={{ fontSize: "13px", fontWeight: "700", color: "#1A1A2E" }}>
+                          {trade.transactionType}
+                        </span>
+                        <span style={{ fontSize: "13px", color: "#374151" }}>
+                          {trade.quantity} × {trade.symbol}
+                        </span>
+                        {trade.status !== "filled" && (
+                          <span style={{
+                            fontSize: "11px", fontWeight: "600",
+                            color: trade.status === "rejected" ? "#EF4444" : "#F59E0B",
+                            background: trade.status === "rejected" ? "#FEF2F2" : "#FFFBEB",
+                            padding: "1px 6px", borderRadius: "4px",
+                          }}>
+                            {trade.status.toUpperCase()}
+                          </span>
+                        )}
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        {trade.executedPrice != null && (
+                          <p style={{ fontSize: "13px", fontWeight: "600", color: "#374151", margin: 0 }}>
+                            ₹{trade.executedPrice.toLocaleString()}
+                          </p>
+                        )}
+                        {trade.realizedPnl != null && trade.realizedPnl !== 0 && (
+                          <p style={{ fontSize: "12px", fontWeight: "600", margin: 0, color: trade.realizedPnl >= 0 ? "#00C9A7" : "#EF4444" }}>
+                            {trade.realizedPnl >= 0 ? "+" : ""}₹{trade.realizedPnl.toLocaleString()}
+                          </p>
+                        )}
+                        <p style={{ fontSize: "11px", color: "#9CA3AF", margin: 0 }}>
+                          {new Date(trade.filledAt ?? trade.createdAt).toLocaleString()}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+              </div>
+            </>
+          ) : (
+            <p style={{ fontSize: "14px", color: "#9CA3AF", fontStyle: "italic", margin: "20px 0 0 0" }}>
+              No trades recorded yet
+            </p>
           )}
         </div>
       )}
 
       {/* Actions */}
-      {(intent.status === "active" || intent.status === "processing" || intent.status === "clarifying" || intent.status === "planning") && (
+      {(intent.status === "active" || intent.status === "paused" || intent.status === "processing" || intent.status === "clarifying" || intent.status === "planning") && (
         <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "12px" }}>
+          {(intent.status === "active" || intent.status === "paused") && (
+            <button
+              onClick={() => void handlePauseToggle()}
+              disabled={pausing}
+              style={{
+                padding: "10px 24px",
+                borderRadius: "8px",
+                border: `1.5px solid ${intent.status === "paused" ? "#00C9A7" : "#F59E0B"}`,
+                background: "white",
+                color: intent.status === "paused" ? "#00C9A7" : "#F59E0B",
+                fontSize: "14px",
+                fontWeight: "600",
+                cursor: pausing ? "not-allowed" : "pointer",
+              }}
+            >
+              {pausing ? "..." : intent.status === "paused" ? "Resume Intent" : "Pause Intent"}
+            </button>
+          )}
           <button
             onClick={() => setShowDeleteConfirm(v => !v)}
             disabled={cancelling}

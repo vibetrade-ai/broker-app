@@ -5,7 +5,7 @@ export function getWsUrl(): string {
 }
 
 export type IntentType = "atomic" | "conditional" | "scheduled" | "agentic" | "composite";
-export type IntentStatus = "processing" | "clarifying" | "planning" | "active" | "completed" | "failed" | "cancelled";
+export type IntentStatus = "processing" | "clarifying" | "planning" | "active" | "paused" | "completed" | "failed" | "cancelled";
 
 export interface ClarificationOption {
   value: string;
@@ -77,6 +77,7 @@ export interface Intent {
   text: string;
   type?: IntentType;
   status: IntentStatus;
+  title?: string;
   summary?: string;
   entryCondition?: string;
   exitCondition?: string;
@@ -171,28 +172,17 @@ export const api = {
     getMessages: (id: string) => apiFetch<MessageView[]>(`/api/conversations/${id}/messages`),
   },
   intents: {
-    create: (text: string) =>
-      apiFetch<{ intentId: string }>("/api/intents", {
-        method: "POST",
-        body: JSON.stringify({ text }),
-      }),
     list: (status?: string) =>
       apiFetch<Intent[]>(`/api/intents${status ? `?status=${status}` : ""}`),
     get: (id: string) => apiFetch<Intent>(`/api/intents/${id}`),
     cancel: (id: string) =>
       apiFetch<{ ok: boolean }>(`/api/intents/${id}`, { method: "DELETE" }),
-    clarify: (id: string, answers: Record<string, string>) =>
-      apiFetch<{ ok: boolean }>(`/api/intents/${id}/clarify`, {
-        method: "POST",
-        body: JSON.stringify({ answers }),
-      }),
+    pause: (id: string) =>
+      apiFetch<{ ok: boolean }>(`/api/intents/${id}/pause`, { method: "POST" }),
+    resume: (id: string) =>
+      apiFetch<{ ok: boolean }>(`/api/intents/${id}/resume`, { method: "POST" }),
     getPerformance: (id: string) =>
       apiFetch<IntentPerformance>(`/api/intents/${id}/performance`),
-    approvePlan: (id: string, approved: boolean, feedback?: string) =>
-      apiFetch<{ ok: boolean }>(`/api/intents/${id}/approve-plan`, {
-        method: "POST",
-        body: JSON.stringify({ approved, feedback }),
-      }),
   },
   approvals: {
     list: (status?: string) =>
@@ -220,5 +210,12 @@ export const api = {
       }),
     getBrokerStatus: () =>
       apiFetch<{ configured: boolean; connected: boolean; expired: boolean; error?: string }>("/api/settings/broker-status"),
+  },
+  halt: {
+    haltAll: () =>
+      apiFetch<{ ok: boolean; halted: { intents: number; orders: number } }>(
+        "/api/halt",
+        { method: "POST" }
+      ),
   },
 };

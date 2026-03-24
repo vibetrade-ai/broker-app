@@ -59,7 +59,6 @@ export default function SettingsPage() {
   const [saveResult, setSaveResult] = useState<Record<string, "ok" | "err">>({});
   const [testResult, setTestResult] = useState<string | null>(null);
   const [testLoading, setTestLoading] = useState(false);
-  const [showKillConfirm, setShowKillConfirm] = useState(false);
 
   useEffect(() => {
     api.settings.getStatus()
@@ -110,6 +109,7 @@ export default function SettingsPage() {
       setTestLoading(false);
     }
   };
+
 
   return (
     <div style={{ flex: 1, overflowY: "auto", display: "flex", flexDirection: "column" }}>
@@ -378,77 +378,6 @@ export default function SettingsPage() {
           </div>
         </Card>
 
-        {/* Emergency Kill Switch */}
-        <SectionTitle title="Emergency" sub="Halt all trading immediately" />
-        <div style={{
-          background: "white",
-          borderRadius: "var(--radius)",
-          border: "1.5px solid var(--red-light)",
-          boxShadow: "var(--shadow-xs)",
-          overflow: "hidden",
-          marginBottom: "28px",
-        }}>
-          <Row border={showKillConfirm}>
-            <div>
-              <p style={{ margin: 0, fontSize: "14px", fontWeight: "700", color: "var(--red)" }}>Kill Switch</p>
-              <p style={{ margin: "2px 0 0", fontSize: "12px", color: "var(--gray-400)" }}>Cancel all orders and halt all autopilots immediately</p>
-            </div>
-            <button
-              onClick={() => setShowKillConfirm(true)}
-              style={{
-                padding: "8px 18px",
-                borderRadius: "var(--radius-xs)",
-                border: "none",
-                background: "var(--red)",
-                color: "white",
-                fontSize: "13px",
-                fontWeight: "700",
-                cursor: "pointer",
-              }}
-            >
-              Halt All
-            </button>
-          </Row>
-          {showKillConfirm && (
-            <div style={{ padding: "16px 20px", background: "#fff5f5" }}>
-              <p style={{ margin: "0 0 14px", fontSize: "13px", color: "var(--red)", fontWeight: "600" }}>
-                Are you sure? This will cancel all pending orders and stop all autopilots.
-              </p>
-              <div style={{ display: "flex", gap: "10px" }}>
-                <button
-                  onClick={() => setShowKillConfirm(false)}
-                  style={{
-                    padding: "7px 16px",
-                    borderRadius: "var(--radius-xs)",
-                    border: "1.5px solid var(--gray-200)",
-                    background: "white",
-                    color: "var(--gray-700)",
-                    fontSize: "13px",
-                    fontWeight: "600",
-                    cursor: "pointer",
-                  }}
-                >
-                  Cancel
-                </button>
-                <button
-                  onClick={() => setShowKillConfirm(false)}
-                  style={{
-                    padding: "7px 16px",
-                    borderRadius: "var(--radius-xs)",
-                    border: "none",
-                    background: "var(--red)",
-                    color: "white",
-                    fontSize: "13px",
-                    fontWeight: "700",
-                    cursor: "pointer",
-                  }}
-                >
-                  Yes, Halt All Trading
-                </button>
-              </div>
-            </div>
-          )}
-        </div>
       </div>
     </div>
   );

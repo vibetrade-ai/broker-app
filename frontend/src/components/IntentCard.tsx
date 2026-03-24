@@ -8,6 +8,7 @@ const STATUS_CONFIG: Record<string, { bg: string; color: string; label: string }
   clarifying: { bg: "var(--amber-light)", color: "var(--amber)", label: "Needs Input" },
   planning: { bg: "var(--violet-light)", color: "var(--violet)", label: "Planning" },
   active: { bg: "var(--green-light)", color: "var(--green)", label: "Active" },
+  paused: { bg: "var(--amber-light)", color: "var(--amber)", label: "Paused" },
   completed: { bg: "var(--gray-100)", color: "var(--gray-500)", label: "Completed" },
   failed: { bg: "var(--red-light)", color: "var(--red)", label: "Failed" },
   cancelled: { bg: "var(--gray-100)", color: "var(--gray-400)", label: "Cancelled" },
@@ -34,12 +35,14 @@ export function IntentCard({ intent, onCancel, onClarified }: Props) {
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [clarifySubmitted, setClarifySubmitted] = useState(false);
   const [perf, setPerf] = useState<IntentPerformance | null>(null);
+  const [localStatus, setLocalStatus] = useState(intent.status);
+  const [pausing, setPausing] = useState(false);
 
-  const sc = STATUS_CONFIG[intent.status] ?? STATUS_CONFIG.completed;
-  const isActive = intent.status === "active";
-  const isClarifying = intent.status === "clarifying";
-  const isPlanning = intent.status === "planning";
-  const isProcessing = intent.status === "processing";
+  const sc = STATUS_CONFIG[localStatus] ?? STATUS_CONFIG.completed;
+  const isActive = localStatus === "active";
+  const isClarifying = localStatus === "clarifying";
+  const isPlanning = localStatus === "planning";
+  const isProcessing = localStatus === "processing";
 
   useEffect(() => {
     if (!isActive) return;
@@ -94,7 +97,7 @@ export function IntentCard({ intent, onCancel, onClarified }: Props) {
           )}
         </div>
         <p style={{
-          margin: "0 0 6px",
+          margin: "0 0 4px",
           fontSize: "14px",
           fontWeight: "700",
           color: "var(--gray-900)",
@@ -105,8 +108,22 @@ export function IntentCard({ intent, onCancel, onClarified }: Props) {
           WebkitBoxOrient: "vertical",
           overflow: "hidden",
         }}>
-          {intent.text}
+          {intent.title ?? intent.summary ?? intent.text}
         </p>
+        {(intent.title ?? intent.summary) && (
+          <p style={{
+            margin: "0 0 4px",
+            fontSize: "12px",
+            color: "var(--gray-400)",
+            lineHeight: "1.4",
+            display: "-webkit-box",
+            WebkitLineClamp: 1,
+            WebkitBoxOrient: "vertical",
+            overflow: "hidden",
+          }}>
+            {intent.summary ?? intent.text}
+          </p>
+        )}
       </div>
 
       {/* Clarification */}
@@ -131,8 +148,7 @@ export function IntentCard({ intent, onCancel, onClarified }: Props) {
             <ClarificationWidget
               questions={intent.clarifications}
               answered={clarifySubmitted}
-              onConfirm={async (answers) => {
-                await api.intents.clarify(intent.id, answers);
+              onConfirm={async () => {
                 setClarifySubmitted(true);
                 onClarified?.(intent.id);
               }}
@@ -223,7 +239,36 @@ export function IntentCard({ intent, onCancel, onClarified }: Props) {
           {timeAgo(intent.createdAt)}
         </p>
         <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
-          {(isActive || isProcessing || isClarifying || isPlanning) && onCancel && (
+          {(localStatus === "active" || localStatus === "paused") && (
+            <button
+              onClick={async () => {
+                if (pausing) return;
+                setPausing(true);
+                try {
+                  if (localStatus === "active") {
+                    await api.intents.pause(intent.id);
+                    setLocalStatus("paused");
+                  } else {
+                    await api.intents.resume(intent.id);
+                    setLocalStatus("active");
+                  }
+                } catch {} finally { setPausing(false); }
+              }}
+              style={{
+                padding: "4px 12px",
+                fontSize: "12px",
+                color: localStatus === "paused" ? "var(--green)" : "var(--amber)",
+                border: `1px solid ${localStatus === "paused" ? "var(--green-light)" : "var(--amber-light)"}`,
+                borderRadius: "6px",
+                background: "none",
+                cursor: "pointer",
+                fontWeight: "600",
+              }}
+            >
+              {pausing ? "..." : localStatus === "paused" ? "Resume" : "Pause"}
+            </button>
+          )}
+          {(isActive || localStatus === "paused" || isProcessing || isClarifying || isPlanning) && onCancel && (
             showDeleteConfirm ? (
               <>
                 <span style={{ fontSize: "11px", color: "var(--gray-500)" }}>Delete this intent?</span>

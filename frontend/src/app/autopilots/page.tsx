@@ -30,7 +30,7 @@ export default function AutopilotsPage() {
     setIntents(prev => prev.filter(i => i.id !== id));
   };
 
-  const active = intents.filter(i => ["active", "processing", "clarifying", "planning"].includes(i.status));
+  const active = intents.filter(i => ["active", "paused", "processing", "clarifying", "planning"].includes(i.status));
   const past = intents.filter(i => i.status === "completed");
 
   return (

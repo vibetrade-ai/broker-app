@@ -10,6 +10,7 @@ import { approvalsRoute } from "./routes/approvals.js";
 import { triggersRoute } from "./routes/triggers.js";
 import { strategiesRoute } from "./routes/strategies.js";
 import { portfoliosRoute } from "./routes/portfolios.js";
+import { haltRoute } from "./routes/halt.js";
 import type { StorageProvider } from "./lib/storage/index.js";
 
 export type HarnessPluginOpts = {
@@ -54,6 +55,7 @@ export async function harnessPlugin(
     triggers: storage.triggers,
     trades: storage.trades,
   });
+  await fastify.register(haltRoute, { intents: storage.intents, triggers: storage.triggers, trades: storage.trades });
 
   const projectRoot = resolve(__dirname, "../../");
   const staticDir = join(projectRoot, "frontend", "out");

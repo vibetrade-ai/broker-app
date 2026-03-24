@@ -1,6 +1,5 @@
 "use client";
 import { useState } from "react";
-import { api } from "@/lib/api";
 
 interface Props {
   onCreated: (intentId: string) => void;
@@ -17,9 +16,8 @@ export function IntentInput({ onCreated }: Props) {
     setLoading(true);
     setError(null);
     try {
-      const { intentId } = await api.intents.create(text.trim());
       setText("");
-      onCreated(intentId);
+      onCreated("");
     } catch (err) {
       setError((err as Error).message);
     } finally {

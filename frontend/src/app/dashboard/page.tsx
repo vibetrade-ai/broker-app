@@ -1,6 +1,6 @@
 "use client";
 import { useState, useEffect, useCallback } from "react";
-import { api, type Portfolio, type PortfolioPerformance, type OpenPosition, type TradeRecord } from "@/lib/api";
+import { api, type Intent, type IntentPerformance, type OpenPosition, type TradeRecord } from "@/lib/api";
 import { TopBar, BrokerPill } from "@/components/TopBar";
 
 function timeAgo(dateStr: string): string {
@@ -34,24 +34,26 @@ function StatCard({ label, value, sub, color }: { label: string; value: string; 
 }
 
 export default function DashboardPage() {
-  const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
-  const [perfs, setPerfs] = useState<PortfolioPerformance[]>([]);
+  const [intents, setIntents] = useState<Intent[]>([]);
+  const [intentPerfs, setIntentPerfs] = useState<IntentPerformance[]>([]);
   const [activeCount, setActiveCount] = useState(0);
   const [loading, setLoading] = useState(true);
 
   const load = useCallback(async () => {
     try {
-      const [portList, intents] = await Promise.all([
-        api.portfolios.list().catch(() => [] as Portfolio[]),
-        api.intents.list("processing,clarifying,planning,active").catch(() => []),
-      ]);
-      setPortfolios(portList);
-      setActiveCount(intents.length);
-      if (portList.length > 0) {
+      const intentList = await api.intents.list("processing,clarifying,planning,active,paused").catch(() => []);
+      setIntents(intentList);
+      setActiveCount(intentList.length);
+
+      const withPrimitives = intentList
+        .filter(i => i.status === "active" && i.primitives.length > 0)
+        .slice(0, 10);
+
+      if (withPrimitives.length > 0) {
         const perfResults = await Promise.all(
-          portList.map(p => api.portfolios.getPerformance(p.id).catch(() => null))
+          withPrimitives.map(i => api.intents.getPerformance(i.id).catch(() => null))
         );
-        setPerfs(perfResults.filter(Boolean) as PortfolioPerformance[]);
+        setIntentPerfs(perfResults.filter(Boolean) as IntentPerformance[]);
       }
     } catch {
       // ignore
@@ -66,10 +68,10 @@ export default function DashboardPage() {
     return () => clearInterval(interval);
   }, [load]);
 
-  const totalDeployed = perfs.reduce((s, p) => s + p.deployedCapital, 0);
-  const totalPnl = perfs.reduce((s, p) => s + p.totalRealizedPnl + p.unrealizedPnl, 0);
-  const allPositions: OpenPosition[] = perfs.flatMap(p => p.openPositions);
-  const allTrades: TradeRecord[] = perfs.flatMap(p => p.trades ?? []);
+  const totalDeployed = intentPerfs.reduce((s, p) => s + p.deployedCapital, 0);
+  const totalPnl = intentPerfs.reduce((s, p) => s + p.realizedPnl + p.unrealizedPnl, 0);
+  const allPositions: OpenPosition[] = intentPerfs.flatMap(p => p.openPositions);
+  const allTrades: TradeRecord[] = intentPerfs.flatMap(p => p.trades ?? []);
   const recentTrades = [...allTrades]
     .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     .slice(0, 6);
@@ -84,10 +86,10 @@ export default function DashboardPage() {
       <div style={{ padding: "28px 32px", flex: 1 }}>
         {loading ? (
           <div style={{ textAlign: "center", padding: "60px", color: "var(--gray-400)" }}>Loading...</div>
-        ) : portfolios.length === 0 ? (
+        ) : intents.length === 0 ? (
           <div style={{ textAlign: "center", padding: "80px 20px" }}>
-            <p style={{ fontSize: "16px", fontWeight: "600", color: "var(--gray-500)", margin: "0 0 8px" }}>No portfolios yet</p>
-            <p style={{ fontSize: "14px", color: "var(--gray-400)", margin: "0 0 20px" }}>Submit a trading intent from Chat to create your first autopilot</p>
+            <p style={{ fontSize: "16px", fontWeight: "600", color: "var(--gray-500)", margin: "0 0 8px" }}>No trading activity yet</p>
+            <p style={{ fontSize: "14px", color: "var(--gray-400)", margin: "0 0 20px" }}>Submit a trading intent from Chat to get started</p>
             <a href="/" style={{
               display: "inline-block",
               padding: "9px 20px",
@@ -116,8 +118,8 @@ export default function DashboardPage() {
               />
               <StatCard
                 label="Total P&L"
-                value={perfs.length > 0 ? `${totalPnl >= 0 ? "+" : "-"}${fmt(totalPnl)}` : "--"}
-                color={perfs.length > 0 ? pnlColor : undefined}
+                value={intentPerfs.length > 0 ? `${totalPnl >= 0 ? "+" : "-"}${fmt(totalPnl)}` : "--"}
+                color={intentPerfs.length > 0 ? pnlColor : undefined}
               />
               <StatCard
                 label="Active Autopilots"

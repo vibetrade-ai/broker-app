@@ -120,7 +120,7 @@ export interface CredentialsStore {
 }
 
 export type IntentType = "atomic" | "conditional" | "scheduled" | "agentic" | "composite";
-export type IntentStatus = "processing" | "clarifying" | "planning" | "active" | "completed" | "failed" | "cancelled";
+export type IntentStatus = "processing" | "clarifying" | "planning" | "active" | "paused" | "completed" | "failed" | "cancelled";
 
 export interface ClarificationOption {
   value: string;
@@ -144,6 +144,7 @@ export interface Intent {
   text: string;
   type?: IntentType;
   status: IntentStatus;
+  title?: string;
   summary?: string;
   entryCondition?: string;
   exitCondition?: string;

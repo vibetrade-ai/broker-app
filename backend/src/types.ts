@@ -1,8 +1,11 @@
 // WebSocket message types
+import type { ClarificationQuestion, Intent } from "./lib/storage/index.js";
 
 export type ClientMessage =
   | { type: "message"; messages: ConversationMessage[] }
-  | { type: "tool_approval_response"; requestId: string; approved: boolean };
+  | { type: "tool_approval_response"; requestId: string; approved: boolean }
+  | { type: "clarification_response"; answers: Record<string, string> }
+  | { type: "plan_response"; approved: boolean; feedback?: string };
 
 export type ServerMessage =
   | { type: "text_delta"; content: string }
@@ -12,7 +15,9 @@ export type ServerMessage =
   | { type: "done" }
   | { type: "token_expired" }
   | { type: "error"; message: string }
-  | { type: "intent_created"; intentId: string };
+  | { type: "ask_clarification"; questions: ClarificationQuestion[] }
+  | { type: "propose_plan"; plan: string; summary: string }
+  | { type: "intent_complete"; intent: Intent };
 
 export interface ConversationMessage {
   role: "user" | "assistant";

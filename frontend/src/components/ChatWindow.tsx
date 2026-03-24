@@ -1,5 +1,7 @@
 "use client";
 import { useState, useEffect, useRef, useCallback } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { api, getWsUrl, type Intent, type ClarificationQuestion } from "@/lib/api";
 import { IntentCard } from "@/components/IntentCard";
 import { ClarificationWidget } from "@/components/ClarificationWidget";
@@ -10,8 +12,8 @@ type ChatMsg =
   | { id: string; role: "user"; text: string }
   | { id: string; role: "thinking" }
   | { id: string; role: "agent_text"; text: string }
-  | { id: string; role: "clarification"; intentId: string; questions: ClarificationQuestion[]; answered?: boolean }
-  | { id: string; role: "plan_proposal"; intentId: string; plan: string; summary: string; submitted?: boolean }
+  | { id: string; role: "clarification"; questions: ClarificationQuestion[]; answered?: boolean }
+  | { id: string; role: "plan_proposal"; plan: string; summary: string; submitted?: boolean }
   | { id: string; role: "intent_card"; intent: Intent }
   | { id: string; role: "error"; text: string };
 
@@ -43,8 +45,8 @@ export function ChatWindow({ initialConversationId }: { initialConversationId?: 
 
   const [messages, setMessages] = useState<ChatMsg[]>([INITIAL_GREETING]);
   const [inputText, setInputText] = useState("");
-  const [activeIntentId, setActiveIntentId] = useState<string | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
+  const [isAwaitingResponse, setIsAwaitingResponse] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const streamingMsgIdRef = useRef<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -52,6 +54,17 @@ export function ChatWindow({ initialConversationId }: { initialConversationId?: 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length]);
+
+  // Reset to a new chat when sidebar clears the stored conversation ID
+  useEffect(() => {
+    const onStorage = () => {
+      const stored = localStorage.getItem("chat:conversationId");
+      if (!stored) handleNewChat();
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Load conversation history when sessionId changes
   useEffect(() => {
@@ -79,7 +92,15 @@ export function ChatWindow({ initialConversationId }: { initialConversationId?: 
 
     ws.onmessage = (event: MessageEvent) => {
       try {
-        const msg = JSON.parse(event.data as string) as { type: string; content?: string; intentId?: string; message?: string };
+        const msg = JSON.parse(event.data as string) as {
+          type: string;
+          content?: string;
+          message?: string;
+          questions?: ClarificationQuestion[];
+          plan?: string;
+          summary?: string;
+          intent?: Intent;
+        };
 
         if (msg.type === "text_delta") {
           const content = msg.content ?? "";
@@ -96,19 +117,37 @@ export function ChatWindow({ initialConversationId }: { initialConversationId?: 
               m.id === id ? { ...m, text: (m as { text: string }).text + content } : m
             ));
           }
+        } else if (msg.type === "ask_clarification") {
+          streamingMsgIdRef.current = null;
+          setIsAwaitingResponse(true);
+          setMessages(prev => [
+            ...prev.filter(m => m.role !== "thinking"),
+            { id: nextId(), role: "clarification", questions: msg.questions ?? [] },
+          ]);
+        } else if (msg.type === "propose_plan") {
+          streamingMsgIdRef.current = null;
+          setIsAwaitingResponse(true);
+          setMessages(prev => [
+            ...prev.filter(m => m.role !== "thinking"),
+            { id: nextId(), role: "plan_proposal", plan: msg.plan ?? "", summary: msg.summary ?? "" },
+          ]);
+        } else if (msg.type === "intent_complete") {
+          streamingMsgIdRef.current = null;
+          if (msg.intent) {
+            setMessages(prev => [
+              ...prev.filter(m => m.role !== "thinking"),
+              { id: nextId(), role: "intent_card", intent: msg.intent! },
+            ]);
+          }
         } else if (msg.type === "done") {
           streamingMsgIdRef.current = null;
           setIsStreaming(false);
+          setIsAwaitingResponse(false);
           setMessages(prev => prev.filter(m => m.role !== "thinking"));
-        } else if (msg.type === "intent_created") {
-          setActiveIntentId(msg.intentId ?? null);
-          setMessages(prev => [
-            ...prev.filter(m => m.role !== "thinking"),
-            { id: nextId(), role: "thinking" },
-          ]);
         } else if (msg.type === "error") {
           streamingMsgIdRef.current = null;
           setIsStreaming(false);
+          setIsAwaitingResponse(false);
           setMessages(prev => [
             ...prev.filter(m => m.role !== "thinking"),
             { id: nextId(), role: "error", text: msg.message ?? "An error occurred" },
@@ -121,6 +160,7 @@ export function ChatWindow({ initialConversationId }: { initialConversationId?: 
 
     ws.onerror = () => {
       setIsStreaming(false);
+      setIsAwaitingResponse(false);
       streamingMsgIdRef.current = null;
     };
 
@@ -133,67 +173,9 @@ export function ChatWindow({ initialConversationId }: { initialConversationId?: 
     setMessages(prev => [...prev, msg]);
   }, []);
 
-  // Polling loop for active intents
-  useEffect(() => {
-    if (!activeIntentId) return;
-
-    const poll = async () => {
-      const data = await api.intents.get(activeIntentId).catch(() => null);
-      if (!data) return;
-
-      if (data.status === "clarifying") {
-        setMessages(msgs => {
-          const hasClarification = msgs.some(m => m.role === "clarification");
-          if (hasClarification) return msgs;
-          return [
-            ...msgs.filter(m => m.role !== "thinking"),
-            { id: nextId(), role: "clarification", intentId: data.id, questions: data.clarifications ?? [] } as ChatMsg,
-          ];
-        });
-      } else if (data.status === "planning") {
-        setMessages(msgs => {
-          const last = msgs.filter(m => m.role === "plan_proposal" && (m as { intentId: string }).intentId === data.id).at(-1) as { role: "plan_proposal"; plan: string; submitted?: boolean } | undefined;
-          if (last && !last.submitted && last.plan === data.plan) return msgs;
-          return [
-            ...msgs.filter(m => m.role !== "thinking"),
-            { id: nextId(), role: "plan_proposal", intentId: data.id, plan: data.plan ?? "", summary: data.planSummary ?? "" } as ChatMsg,
-          ];
-        });
-      } else if (data.status === "processing") {
-        setMessages(msgs => {
-          const hasClarification = msgs.some(m => m.role === "clarification");
-          const hasPlanProposal = msgs.some(m => m.role === "plan_proposal");
-          const hasGotIt = msgs.some(m => m.role === "agent_text" && (m as { text: string }).text === "Got it, setting things up...");
-          if ((hasClarification || hasPlanProposal) && !hasGotIt) {
-            return [
-              ...msgs.filter(m => m.role !== "thinking"),
-              { id: nextId(), role: "agent_text", text: "Got it, setting things up..." } as ChatMsg,
-              { id: nextId(), role: "thinking" } as ChatMsg,
-            ];
-          }
-          return msgs;
-        });
-      } else if (data.status === "active") {
-        setMessages(msgs => [
-          ...msgs.filter(m => m.role !== "thinking"),
-          { id: nextId(), role: "intent_card", intent: data } as ChatMsg,
-        ]);
-        setActiveIntentId(null);
-      } else if (data.status === "failed") {
-        setMessages(msgs => [
-          ...msgs.filter(m => m.role !== "thinking"),
-          { id: nextId(), role: "error", text: "Something went wrong processing your request. Please try again." } as ChatMsg,
-        ]);
-        setActiveIntentId(null);
-      }
-    };
-
-    const interval = setInterval(() => void poll(), 2000);
-    return () => clearInterval(interval);
-  }, [activeIntentId]);
-
   const handleSubmit = () => {
-    if (!inputText.trim() || isStreaming || activeIntentId) return;
+    const isInFlight = isStreaming || isAwaitingResponse;
+    if (!inputText.trim() || isInFlight) return;
     const text = inputText.trim();
     setInputText("");
     addMessage({ id: nextId(), role: "user", text });
@@ -206,20 +188,18 @@ export function ChatWindow({ initialConversationId }: { initialConversationId?: 
     }));
   };
 
-  const handleApprovePlan = useCallback(async (intentId: string, approved: boolean, feedback?: string) => {
-    await api.intents.approvePlan(intentId, approved, feedback);
+  const handleApprovePlan = useCallback((approved: boolean, feedback?: string) => {
+    wsRef.current?.send(JSON.stringify({ type: "plan_response", approved, feedback }));
     setMessages(prev => [
-      ...prev.map(m => m.role === "plan_proposal" && (m as { intentId: string }).intentId === intentId ? { ...m, submitted: true } : m),
+      ...prev.map(m => m.role === "plan_proposal" ? { ...m, submitted: true } : m),
       { id: nextId(), role: "thinking" } as ChatMsg,
     ]);
   }, []);
 
-  const handleClarify = useCallback(async (intentId: string, answers: Record<string, string>) => {
-    await api.intents.clarify(intentId, answers);
+  const handleClarify = useCallback((answers: Record<string, string>) => {
+    wsRef.current?.send(JSON.stringify({ type: "clarification_response", answers }));
     setMessages(prev => [
-      ...prev.map(m =>
-        m.role === "clarification" && m.intentId === intentId ? { ...m, answered: true } : m
-      ),
+      ...prev.map(m => m.role === "clarification" ? { ...m, answered: true } : m),
       { id: nextId(), role: "thinking" } as ChatMsg,
     ]);
   }, []);
@@ -230,13 +210,13 @@ export function ChatWindow({ initialConversationId }: { initialConversationId?: 
     window.dispatchEvent(new Event("storage"));
     streamingMsgIdRef.current = null;
     setIsStreaming(false);
-    setActiveIntentId(null);
+    setIsAwaitingResponse(false);
     setInputText("");
     setSessionId(newId);
   };
 
   const sessionTitle = (messages.find(m => m.role === "user") as { text: string } | undefined)?.text?.slice(0, 50) ?? "New Chat";
-  const isInFlight = isStreaming || activeIntentId !== null;
+  const isInFlight = isStreaming || isAwaitingResponse;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100vh" }}>
@@ -386,9 +366,8 @@ export function ChatWindow({ initialConversationId }: { initialConversationId?: 
                   fontSize: "15px",
                   maxWidth: "65%",
                   lineHeight: "1.5",
-                  whiteSpace: "pre-wrap",
-                }}>
-                  {msg.text}
+                }} className="chat-markdown">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.text}</ReactMarkdown>
                 </div>
               </div>
             );
@@ -422,7 +401,7 @@ export function ChatWindow({ initialConversationId }: { initialConversationId?: 
                 }}>
                   <ClarificationWidget
                     questions={msg.questions}
-                    onConfirm={(answers) => handleClarify(msg.intentId, answers)}
+                    onConfirm={async (answers) => handleClarify(answers)}
                     answered={msg.answered}
                     variant="chat"
                   />
@@ -461,8 +440,8 @@ export function ChatWindow({ initialConversationId }: { initialConversationId?: 
                     plan={msg.plan}
                     summary={msg.summary}
                     submitted={msg.submitted}
-                    onApprove={() => handleApprovePlan(msg.intentId, true)}
-                    onRequestChanges={(feedback) => handleApprovePlan(msg.intentId, false, feedback)}
+                    onApprove={async () => handleApprovePlan(true)}
+                    onRequestChanges={async (feedback) => handleApprovePlan(false, feedback)}
                   />
                 </div>
               </div>
@@ -596,6 +575,24 @@ export function ChatWindow({ initialConversationId }: { initialConversationId?: 
           0%, 80%, 100% { opacity: 0.3; transform: scale(0.8); }
           40% { opacity: 1; transform: scale(1); }
         }
+        .chat-markdown > *:first-child { margin-top: 0; }
+        .chat-markdown > *:last-child { margin-bottom: 0; }
+        .chat-markdown p { margin: 0 0 8px 0; }
+        .chat-markdown ul, .chat-markdown ol { margin: 0 0 8px 0; padding-left: 20px; }
+        .chat-markdown li { margin-bottom: 2px; }
+        .chat-markdown strong { font-weight: 600; }
+        .chat-markdown code { background: var(--gray-100); padding: 1px 5px; border-radius: 4px; font-size: 13px; font-family: monospace; }
+        .chat-markdown pre { background: var(--gray-100); padding: 10px 14px; border-radius: 6px; overflow-x: auto; margin: 0 0 8px 0; }
+        .chat-markdown pre code { background: none; padding: 0; }
+        .chat-markdown table { border-collapse: collapse; width: 100%; margin-bottom: 8px; font-size: 13px; }
+        .chat-markdown th, .chat-markdown td { border: 1px solid var(--gray-200); padding: 5px 10px; text-align: left; }
+        .chat-markdown th { background: var(--gray-50); font-weight: 600; }
+        .chat-markdown h1, .chat-markdown h2, .chat-markdown h3 { margin: 8px 0 4px 0; font-weight: 700; }
+        .chat-markdown h1 { font-size: 17px; }
+        .chat-markdown h2 { font-size: 15px; }
+        .chat-markdown h3 { font-size: 14px; }
+        .chat-markdown blockquote { border-left: 3px solid var(--gray-300); margin: 0 0 8px 0; padding-left: 12px; color: var(--gray-500); }
+        .chat-markdown hr { border: none; border-top: 1px solid var(--gray-200); margin: 8px 0; }
       `}</style>
     </div>
   );

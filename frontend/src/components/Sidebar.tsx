@@ -156,10 +156,15 @@ export function Sidebar() {
       <nav style={{ padding: "12px 12px 0" }}>
         {NAV_ITEMS.map(item => {
           const isActive = item.path === "/" ? pathname === "/" : pathname.startsWith(item.path);
+          const isChat = item.path === "/";
           return (
             <a
               key={item.path}
               href={item.path}
+              onClick={isChat ? () => {
+                localStorage.removeItem("chat:conversationId");
+                window.dispatchEvent(new Event("storage"));
+              } : undefined}
               style={{
                 display: "flex",
                 alignItems: "center",
